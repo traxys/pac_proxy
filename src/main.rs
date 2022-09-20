@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use color_eyre::eyre::Context;
-use http::uri::Port;
 use http::{HeaderValue, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::upgrade::Upgraded;
@@ -33,9 +32,14 @@ async fn pac_task(
     let mut pac_file = pac_lib.load(&file)?;
 
     while let Some((url, rsp)) = rx.recv().await {
-        let proxy = pac_file.find_proxy(&url)?;
-
-        let _ = rsp.send(proxy);
+        match pac_file.find_proxy(&url) {
+            Ok(proxy) => {
+                let _ = rsp.send(proxy);
+            }
+            Err(e) => {
+                println!("Error for {url}: {e:#?}");
+            }
+        }
     }
 
     Ok(())
@@ -109,7 +113,11 @@ async fn proxy(
     let uri = req.uri();
     let (send, recv) = oneshot::channel();
 
-    let url = if let Some("443") = uri.port().as_ref().map(|p| p.as_str()) {
+    let url = if uri.scheme().is_some() {
+        uri.to_string()
+            .parse()
+            .context("URI with scheme is not an url")?
+    } else if let Some("443") = uri.port().as_ref().map(|p| p.as_str()) {
         format!("https://{uri}")
             .parse()
             .context("URI was not an URL")?
@@ -124,7 +132,7 @@ async fn proxy(
         .await
         .expect("PAC task errored");
 
-    let proxies = recv.await.expect("PAC task exited");
+    let proxies = recv.await.context("PAC task did not respond")?;
 
     if Method::CONNECT == req.method() {
         // Received an HTTP request like:
